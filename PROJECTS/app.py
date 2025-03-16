@@ -1,141 +1,200 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
-import mysql.connector
+import mysql.connector.pooling
+from datetime import datetime
+import os
 
-app = Flask(__name__)
-app.secret_key = 'your_secret_key'
+app = Flask(__name__, template_folder="templates")
+app.secret_key = os.urandom(24)  # Secure random secret key
 
-# MySQL database configuration
+# Database configuration with connection pooling
 db_config = {
     'user': 'root',
     'password': 'root',
     'host': 'localhost',
-    'database': 'student'
+    'database': 'student',
+    'pool_name': 'task_pool',
+    'pool_size': 5
 }
 
+# Create connection pool
+cnxpool = mysql.connector.pooling.MySQLConnectionPool(**db_config)
+
 def create_table():
-    """Creates the tasks table if it doesn't exist."""
-    conn = mysql.connector.connect(**db_config)
+    """Initialize database table."""
+    conn = cnxpool.get_connection()
     cursor = conn.cursor()
-
-    cursor.execute('''CREATE TABLE IF NOT EXISTS tasks (
-                task_id INT AUTO_INCREMENT PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                description TEXT NOT NULL,
-                due_date DATE NOT NULL,
-                completed BOOLEAN DEFAULT FALSE
-            )''')
-
-    conn.commit()
-    conn.close()
+    try:
+        cursor.execute('''CREATE TABLE IF NOT EXISTS tasks (
+                    task_id INT AUTO_INCREMENT PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    description TEXT NOT NULL,
+                    due_date DATE NOT NULL,
+                    completed BOOLEAN DEFAULT FALSE
+                )''')
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 def execute_query(query, values=None):
-    """Executes a MySQL query."""
-    conn = mysql.connector.connect(**db_config)
+    """Execute database query with error handling."""
+    conn = cnxpool.get_connection()
     cursor = conn.cursor()
+    try:
+        cursor.execute(query, values or ())
+        conn.commit()
+        return cursor.rowcount
+    except Exception as e:
+        conn.rollback()
+        app.logger.error(f"Database error: {e}")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
-    if values:
-        cursor.execute(query, values)
-    else:
-        cursor.execute(query)
-
-    conn.commit()
-    conn.close()
-
-def fetch_tasks():
-    """Fetches tasks from the database."""
-    conn = mysql.connector.connect(**db_config)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT task_id, title, description, due_date, completed FROM tasks")
-    tasks = cursor.fetchall()
-
-    conn.close()
-    return tasks
-
-def fetch_task_by_id(task_id):
-    """Fetches a task by its ID."""
-    conn = mysql.connector.connect(**db_config)
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT title, description, due_date FROM tasks WHERE task_id = %s", (task_id,))
-    task = cursor.fetchone()
-
-    conn.close()
-    return task
+def fetch_tasks(filter_date=None):
+    """Retrieve tasks with optional date filter."""
+    conn = cnxpool.get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if filter_date:
+            cursor.execute("SELECT * FROM tasks WHERE due_date = %s", (filter_date,))
+        else:
+            cursor.execute("SELECT * FROM tasks")
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.route('/')
-def index():
-    create_table()
-    tasks = fetch_tasks()
-    return render_template('index.html', tasks=tasks)
+def list_tasks():
+    """List all tasks."""
+    try:
+        tasks = fetch_tasks()
+        return render_template('index.html', tasks=tasks)
+    except Exception as e:
+        app.logger.error(f"Error fetching tasks: {e}")
+        flash('Error loading tasks', 'error')
+        return render_template('index.html', tasks=[])
 
-@app.route('/create_task', methods=['POST'])
+@app.route('/tasks', methods=['POST'])
 def create_task():
-    title = request.form['title']
-    description = request.form['description']
-    due_date = request.form['due_date']
+    """Handle task creation."""
+    title = request.form.get('title', '').strip()
+    description = request.form.get('description', '').strip()
+    due_date = request.form.get('due_date', '').strip()
 
-    if not title or not description or not due_date:
-        flash('Please fill in all fields.', 'error')
-        return redirect(url_for('index'))
+    if not all([title, description, due_date]):
+        flash('All fields are required', 'error')
+        return redirect(url_for('list_tasks'))
 
-    query = "INSERT INTO tasks (title, description, due_date, completed) VALUES (%s, %s, %s, %s)"
-    values = (title, description, due_date, False)
-    execute_query(query, values)
+    try:
+        due_date = datetime.strptime(due_date, '%Y-%m-%d').date()
+    except ValueError:
+        flash('Invalid date format. Use YYYY-MM-DD.', 'error')
+        return redirect(url_for('list_tasks'))
 
-    flash('Task created successfully!', 'success')
-    return redirect(url_for('index'))
+    try:
+        execute_query(
+            "INSERT INTO tasks (title, description, due_date) VALUES (%s, %s, %s)",
+            (title, description, due_date)
+        )
+        flash('Task created successfully', 'success')
+    except Exception as e:
+        app.logger.error(f"Error creating task: {e}")
+        flash('Error creating task', 'error')
 
-@app.route('/fetch_tasks', methods=['POST'])
-def fetch_tasks_by_date():
-    due_date = request.form['due_date']
+    return redirect(url_for('list_tasks'))
 
-    if not due_date:
-        flash('Please enter a due date.', 'error')
-        return redirect(url_for('index'))
+@app.route('/tasks/<int:task_id>', methods=['GET', 'POST'])
+def handle_task(task_id):
+    """Combined edit/update operations."""
+    if request.method == 'GET':
+        return show_edit_form(task_id)
+    return update_task(task_id)
 
-    conn = mysql.connector.connect(**db_config)
-    cursor = conn.cursor()
+def show_edit_form(task_id):
+    """Display task edit form."""
+    conn = cnxpool.get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
+        task = cursor.fetchone()
+        if not task:
+            flash('Task not found', 'error')
+            return redirect(url_for('list_tasks'))
+        return render_template('edit_task.html', task=task)
+    except Exception as e:
+        app.logger.error(f"Error fetching task {task_id}: {e}")
+        flash('Error loading task', 'error')
+        return redirect(url_for('list_tasks'))
+    finally:
+        cursor.close()
+        conn.close()
 
-    cursor.execute("SELECT task_id, title, description, due_date, completed FROM tasks WHERE due_date = %s", (due_date,))
-    tasks = cursor.fetchall()
-
-    conn.close()
-
-    if not tasks:
-        flash(f'No tasks found for due date {due_date}.', 'info')
-
-    return render_template('index.html', tasks=tasks)
-
-@app.route('/update_task/<int:task_id>', methods=['POST'])
 def update_task(task_id):
-    title = request.form['title']
-    description = request.form['description']
-    due_date = request.form['due_date']
+    """Update existing task."""
+    title = request.form.get('title', '').strip()
+    description = request.form.get('description', '').strip()
+    due_date = request.form.get('due_date', '').strip()
 
-    if not title or not description or not due_date:
-        flash('Please fill in all fields.', 'error')
-        return redirect(url_for('index'))
+    if not all([title, description, due_date]):
+        flash('All fields are required', 'error')
+        return redirect(url_for('handle_task', task_id=task_id))
 
-    query = "UPDATE tasks SET title = %s, description = %s, due_date = %s WHERE task_id = %s"
-    values = (title, description, due_date, task_id)
-    execute_query(query, values)
+    try:
+        due_date = datetime.strptime(due_date, '%Y-%m-%d').date()
+    except ValueError:
+        flash('Invalid date format. Use YYYY-MM-DD.', 'error')
+        return redirect(url_for('handle_task', task_id=task_id))
 
-    flash('Task updated successfully!', 'success')
-    return redirect(url_for('index'))
+    try:
+        affected = execute_query(
+            "UPDATE tasks SET title=%s, description=%s, due_date=%s WHERE task_id=%s",
+            (title, description, due_date, task_id)
+        )
+        if affected == 0:
+            flash('Task not found', 'error')
+        else:
+            flash('Task updated successfully', 'success')
+    except Exception as e:
+        app.logger.error(f"Error updating task {task_id}: {e}")
+        flash('Error updating task', 'error')
 
-@app.route('/delete_task/<int:task_id>', methods=['POST'])
+    return redirect(url_for('list_tasks'))
+
+@app.route('/tasks/<int:task_id>/delete', methods=['POST'])
 def delete_task(task_id):
-    query = "DELETE FROM tasks WHERE task_id = %s"
-    execute_query(query, (task_id,))
-    flash('Task deleted successfully!', 'success')
-    return redirect(url_for('index'))
+    """Handle task deletion."""
+    try:
+        affected = execute_query(
+            "DELETE FROM tasks WHERE task_id = %s",
+            (task_id,)
+        )
+        if affected == 0:
+            flash('Task not found', 'error')
+        else:
+            flash('Task deleted successfully', 'success')
+    except Exception as e:
+        app.logger.error(f"Error deleting task {task_id}: {e}")
+        flash('Error deleting task', 'error')
+    return redirect(url_for('list_tasks'))
 
-@app.route('/edit_task/<int:task_id>', methods=['GET'])
-def edit_task(task_id):
-    task = fetch_task_by_id(task_id)
-    return render_template('edit_task.html', task=task, task_id=task_id)
+@app.route('/tasks/filter', methods=['GET'])
+def filter_tasks():
+    """Filter tasks by date."""
+    date_str = request.args.get('date', '')
+    if not date_str:
+        return redirect(url_for('list_tasks'))
 
+    try:
+        filter_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        tasks = fetch_tasks(filter_date)
+        return render_template('index.html', tasks=tasks)
+    except ValueError:
+        flash('Invalid date format. Use YYYY-MM-DD.', 'error')
+        return redirect(url_for('list_tasks'))
 
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    create_table()
+    app.run(host='0.0.0.0', port=5000, debug=True)
