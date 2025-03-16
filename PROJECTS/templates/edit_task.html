@@ -1,1 +1,189 @@
+<style>
+    .task-form {
+        max-width: 600px;
+        margin: 2rem auto;
+        padding: 2rem;
+        background: #ffffff;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s ease;
+    }
 
+    .task-form:hover {
+        transform: translateY(-2px);
+    }
+
+    .form-label {
+        font-weight: 600;
+        color: #2d3748;
+        margin-bottom: 0.5rem;
+        display: block;
+    }
+
+    .form-control {
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .form-control:focus {
+        border-color: #4f46e5;
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+    }
+
+    .form-control.error {
+        border-color: #ef4444;
+    }
+
+    .error-message {
+        color: #ef4444;
+        font-size: 0.875rem;
+        margin-top: 0.25rem;
+        display: none;
+    }
+
+    .btn-primary {
+        background: linear-gradient(135deg, #4f46e5, #6366f1);
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+
+    .btn-primary:hover {
+        transform: scale(1.02);
+        box-shadow: 0 4px 6px rgba(79, 70, 229, 0.2);
+    }
+
+    .btn-primary:active {
+        transform: scale(0.98);
+    }
+
+    .success-message {
+        background: #10b981;
+        color: white;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        display: none;
+    }
+</style>
+
+<div class="success-message" id="successMessage">
+    Task updated successfully!
+</div>
+
+<form method="POST" action="{{ url_for('handle_task', task_id=task.task_id) }}" class="task-form" id="taskForm">
+    <div class="mb-4">
+        <label class="form-label">Title</label>
+        <input type="text" name="title" class="form-control" id="titleInput" value="{{ task.title }}" required>
+        <div class="error-message" id="titleError">Please enter a valid title</div>
+    </div>
+
+    <div class="mb-4">
+        <label class="form-label">Description</label>
+        <textarea name="description" class="form-control" id="descriptionInput" rows="4" required>{{ task.description }}</textarea>
+        <div class="error-message" id="descriptionError">Description cannot be empty</div>
+        <div class="text-sm text-gray-500 mt-1" id="charCount">0/500 characters</div>
+    </div>
+
+    <div class="mb-4">
+        <label class="form-label">Due Date</label>
+        <input type="date" name="due_date" class="form-control" id="dateInput" 
+               value="{{ task.due_date.strftime('%Y-%m-%d') }}" required>
+        <div class="error-message" id="dateError">Please select a valid future date</div>
+    </div>
+
+    <button type="submit" class="btn btn-primary w-100" id="submitButton">
+        <i class="bi bi-save me-2"></i>Update Task
+    </button>
+</form>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const form = document.getElementById('taskForm');
+        const titleInput = document.getElementById('titleInput');
+        const descriptionInput = document.getElementById('descriptionInput');
+        const dateInput = document.getElementById('dateInput');
+        const successMessage = document.getElementById('successMessage');
+
+        // Character counter for description
+        descriptionInput.addEventListener('input', updateCharCount);
+        
+        function updateCharCount() {
+            const charCount = document.getElementById('charCount');
+            const currentLength = descriptionInput.value.length;
+            charCount.textContent = `${currentLength}/500 characters`;
+            if (currentLength > 500) {
+                charCount.classList.add('text-red-500');
+            } else {
+                charCount.classList.remove('text-red-500');
+            }
+        }
+
+        // Real-time validation
+        titleInput.addEventListener('input', validateTitle);
+        descriptionInput.addEventListener('input', validateDescription);
+        dateInput.addEventListener('change', validateDate);
+
+        function validateTitle() {
+            const isValid = titleInput.value.trim().length >= 3;
+            toggleError(titleInput, 'titleError', isValid);
+            return isValid;
+        }
+
+        function validateDescription() {
+            const isValid = descriptionInput.value.trim().length >= 10;
+            toggleError(descriptionInput, 'descriptionError', isValid);
+            return isValid;
+        }
+
+        function validateDate() {
+            const selectedDate = new Date(dateInput.value);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const isValid = selectedDate >= today;
+            toggleError(dateInput, 'dateError', isValid);
+            return isValid;
+        }
+
+        function toggleError(input, errorId, isValid) {
+            const errorElement = document.getElementById(errorId);
+            if (!isValid) {
+                input.classList.add('error');
+                errorElement.style.display = 'block';
+            } else {
+                input.classList.remove('error');
+                errorElement.style.display = 'none';
+            }
+        }
+
+        // Form submission handler
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            
+            const isTitleValid = validateTitle();
+            const isDescValid = validateDescription();
+            const isDateValid = validateDate();
+
+            if (isTitleValid && isDescValid && isDateValid) {
+                // Disable button to prevent double submission
+                const submitButton = document.getElementById('submitButton');
+                submitButton.disabled = true;
+                submitButton.innerHTML = '<i class="bi bi-arrow-repeat me-2"></i>Updating...';
+
+                // Simulate submission delay (remove in production)
+                setTimeout(() => {
+                    form.submit();
+                    successMessage.style.display = 'block';
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                }, 1000);
+            }
+        });
+
+        // Initial character count update
+        updateCharCount();
+    });
+</script>
